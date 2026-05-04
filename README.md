@@ -20,6 +20,7 @@ strata project
 strata start [project]
 strata pause
 strata stop
+strata discard
 strata ls [project]
 strata mv <source-project> <target-project>
 ```
@@ -31,6 +32,10 @@ strata mv <source-project> <target-project>
 ```text
 strata start work/client
 ```
+
+`strata ls` summarizes the current project like a small directory listing. Immediate child projects show their rolled-up total time, including nested records. The `(unk.)` row shows time recorded directly on the current project rather than inside a child project.
+
+`strata discard` works only when a timer is running or paused. It asks for confirmation, then clears the current session without saving a time record.
 
 ## Development
 

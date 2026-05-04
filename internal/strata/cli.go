@@ -1,13 +1,15 @@
 package strata
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
-func Main(args []string, stdout, stderr io.Writer) int {
+func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	store, err := NewStoreFromEnv()
 	if err != nil {
 		fmt.Fprintf(stderr, "strata: %v\n", err)
@@ -32,6 +34,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		runErr = runPause(store, args[1:], stdout)
 	case "stop":
 		runErr = runStop(store, args[1:], stdout)
+	case "discard":
+		runErr = runDiscard(store, args[1:], stdin, stdout)
 	case "ls":
 		runErr = runList(store, args[1:], stdout)
 	case "mv":
@@ -132,6 +136,42 @@ func runStop(store *Store, args []string, stdout io.Writer) error {
 	return nil
 }
 
+func runDiscard(store *Store, args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) != 0 {
+		return errors.New("usage: strata discard")
+	}
+
+	state, err := store.LoadState()
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		return errors.New("no active timer")
+	}
+	if state.Status != TimerStatusRunning && state.Status != TimerStatusPaused {
+		return fmt.Errorf("unknown timer state %q", state.Status)
+	}
+
+	elapsed := elapsedForState(*state, time.Now())
+	fmt.Fprintf(stdout, "Discard current %s timer on %s (%s)? [y/N]: ", state.Status, state.ProjectPath, FormatDuration(elapsed))
+
+	answer, err := bufio.NewReader(stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read confirmation: %w", err)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		if err := store.ClearState(); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Discarded current session on %s.\n", state.ProjectPath)
+	default:
+		fmt.Fprintln(stdout, "Discard cancelled.")
+	}
+	return nil
+}
+
 func runList(store *Store, args []string, stdout io.Writer) error {
 	if len(args) > 1 {
 		return errors.New("usage: strata ls [project]")
@@ -161,28 +201,57 @@ func runList(store *Store, args []string, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "%s\n\n", title)
 
-	fmt.Fprintln(stdout, "Folders:")
-	if len(children) == 0 {
-		fmt.Fprintln(stdout, "  none")
-	} else {
-		for _, child := range children {
-			fmt.Fprintf(stdout, "  %s/\n", BaseProjectName(child.Path))
+	rows := listRows(children, records, projectPath)
+	nameWidth := 0
+	for _, row := range rows {
+		if len(row.name) > nameWidth {
+			nameWidth = len(row.name)
 		}
 	}
-
-	fmt.Fprintln(stdout, "\nFiles:")
-	wroteRecord := false
-	for _, record := range records {
-		if record.ProjectPath != projectPath {
-			continue
-		}
-		wroteRecord = true
-		fmt.Fprintf(stdout, "  %s  %s  %s\n", FormatLocalTime(record.StartedAt), FormatDuration(time.Duration(record.DurationNanos)), record.ID)
-	}
-	if !wroteRecord {
-		fmt.Fprintln(stdout, "  none")
+	for _, row := range rows {
+		fmt.Fprintf(stdout, "%-*s  %s\n", nameWidth, row.name, FormatDuration(row.duration))
 	}
 	return nil
+}
+
+type listRow struct {
+	name     string
+	duration time.Duration
+}
+
+func listRows(children []Project, records []Record, projectPath string) []listRow {
+	rows := make([]listRow, 0, len(children)+1)
+	for _, child := range children {
+		rows = append(rows, listRow{
+			name:     BaseProjectName(child.Path) + "/",
+			duration: totalDurationInSubtree(records, child.Path),
+		})
+	}
+	rows = append(rows, listRow{
+		name:     "(unk.)",
+		duration: totalDurationDirectlyInProject(records, projectPath),
+	})
+	return rows
+}
+
+func totalDurationInSubtree(records []Record, projectPath string) time.Duration {
+	var total time.Duration
+	for _, record := range records {
+		if isProjectInSubtree(record.ProjectPath, projectPath) {
+			total += time.Duration(record.DurationNanos)
+		}
+	}
+	return total
+}
+
+func totalDurationDirectlyInProject(records []Record, projectPath string) time.Duration {
+	var total time.Duration
+	for _, record := range records {
+		if record.ProjectPath == projectPath {
+			total += time.Duration(record.DurationNanos)
+		}
+	}
+	return total
 }
 
 func runMove(store *Store, args []string, stdout io.Writer) error {
@@ -204,6 +273,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  strata start [project]")
 	fmt.Fprintln(w, "  strata pause")
 	fmt.Fprintln(w, "  strata stop")
+	fmt.Fprintln(w, "  strata discard")
 	fmt.Fprintln(w, "  strata ls [project]")
 	fmt.Fprintln(w, "  strata mv <source-project> <target-project>")
 }
