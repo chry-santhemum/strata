@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,7 +35,7 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "pause":
 		runErr = runPause(store, args[1:], stdout)
 	case "stop":
-		runErr = runStop(store, args[1:], stdout)
+		runErr = runStop(store, args[1:], stdin, stdout)
 	case "discard":
 		runErr = runDiscard(store, args[1:], stdin, stdout)
 	case "ls":
@@ -116,11 +118,33 @@ func runPause(store *Store, args []string, stdout io.Writer) error {
 	return nil
 }
 
-func runStop(store *Store, args []string, stdout io.Writer) error {
-	if len(args) != 0 {
-		return errors.New("usage: strata stop")
+func runStop(store *Store, args []string, stdin io.Reader, stdout io.Writer) error {
+	adjustment, hasAdjustment, err := parseStopAdjustment(args)
+	if err != nil {
+		return err
 	}
-	result, err := store.StopTimer(time.Now())
+
+	plan, err := store.PlanStop(time.Now(), adjustment)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Stop current %s timer on %s?\n", plan.Status, plan.ProjectPath)
+	fmt.Fprintf(stdout, "Duration: %s\n", FormatDuration(plan.Duration))
+	if hasAdjustment {
+		fmt.Fprintf(stdout, "Adjustment: %s\n", FormatSignedDuration(plan.Adjustment))
+	}
+	fmt.Fprint(stdout, "Save this record? [y/N]: ")
+
+	confirmed, err := readConfirmation(stdin)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		fmt.Fprintln(stdout, "Stop cancelled.")
+		return nil
+	}
+
+	result, err := store.CommitStop(plan, time.Now())
 	if err != nil {
 		return err
 	}
@@ -134,6 +158,24 @@ func runStop(store *Store, args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "%s: %s  %s\n", label, total.ProjectPath, FormatDuration(total.Duration))
 	}
 	return nil
+}
+
+func parseStopAdjustment(args []string) (time.Duration, bool, error) {
+	if len(args) == 0 {
+		return 0, false, nil
+	}
+	if len(args) > 1 {
+		return 0, false, errors.New("usage: strata stop [negative-hour-adjustment]")
+	}
+
+	hours, err := strconv.ParseFloat(args[0], 64)
+	if err != nil || math.IsNaN(hours) || math.IsInf(hours, 0) {
+		return 0, false, errors.New("stop adjustment must be a negative number of hours")
+	}
+	if hours >= 0 {
+		return 0, false, errors.New("stop adjustment must be negative")
+	}
+	return time.Duration(hours * float64(time.Hour)), true, nil
 }
 
 func runDiscard(store *Store, args []string, stdin io.Reader, stdout io.Writer) error {
@@ -155,21 +197,32 @@ func runDiscard(store *Store, args []string, stdin io.Reader, stdout io.Writer) 
 	elapsed := elapsedForState(*state, time.Now())
 	fmt.Fprintf(stdout, "Discard current %s timer on %s (%s)? [y/N]: ", state.Status, state.ProjectPath, FormatDuration(elapsed))
 
-	answer, err := bufio.NewReader(stdin).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("read confirmation: %w", err)
+	confirmed, err := readConfirmation(stdin)
+	if err != nil {
+		return err
 	}
-
-	switch strings.ToLower(strings.TrimSpace(answer)) {
-	case "y", "yes":
+	if confirmed {
 		if err := store.ClearState(); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "Discarded current session on %s.\n", state.ProjectPath)
-	default:
+	} else {
 		fmt.Fprintln(stdout, "Discard cancelled.")
 	}
 	return nil
+}
+
+func readConfirmation(stdin io.Reader) (bool, error) {
+	answer, err := bufio.NewReader(stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("read confirmation: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func runList(store *Store, args []string, stdout io.Writer) error {
@@ -272,7 +325,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  strata project")
 	fmt.Fprintln(w, "  strata start [project]")
 	fmt.Fprintln(w, "  strata pause")
-	fmt.Fprintln(w, "  strata stop")
+	fmt.Fprintln(w, "  strata stop [negative-hour-adjustment]")
 	fmt.Fprintln(w, "  strata discard")
 	fmt.Fprintln(w, "  strata ls [project]")
 	fmt.Fprintln(w, "  strata mv <source-project> <target-project>")

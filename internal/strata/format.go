@@ -29,6 +29,13 @@ func FormatDuration(duration time.Duration) string {
 	return strings.Join(parts, " ")
 }
 
+func FormatSignedDuration(duration time.Duration) string {
+	if duration < 0 {
+		return "-" + FormatDuration(-duration)
+	}
+	return FormatDuration(duration)
+}
+
 func FormatLocalTime(t time.Time) string {
 	return t.Local().Format("2006-01-02 15:04")
 }

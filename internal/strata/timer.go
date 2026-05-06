@@ -23,6 +23,14 @@ type StopResult struct {
 	Totals []ProjectTotal
 }
 
+type StopPlan struct {
+	ProjectPath string
+	Status      string
+	StartedAt   time.Time
+	Duration    time.Duration
+	Adjustment  time.Duration
+}
+
 func (s *Store) StartTimer(projectPath string, now time.Time) (StartResult, error) {
 	state, err := s.LoadState()
 	if err != nil {
@@ -97,7 +105,33 @@ func (s *Store) PauseTimer(now time.Time) (PauseResult, error) {
 	return PauseResult{ProjectPath: state.ProjectPath, Elapsed: elapsed}, nil
 }
 
-func (s *Store) StopTimer(now time.Time) (StopResult, error) {
+func (s *Store) PlanStop(now time.Time, adjustment time.Duration) (StopPlan, error) {
+	state, err := s.LoadState()
+	if err != nil {
+		return StopPlan{}, err
+	}
+	if state == nil {
+		return StopPlan{}, errors.New("no active timer")
+	}
+	if state.Status != TimerStatusRunning && state.Status != TimerStatusPaused {
+		return StopPlan{}, fmt.Errorf("unknown timer state %q", state.Status)
+	}
+
+	duration := elapsedForState(*state, now) + adjustment
+	if duration <= 0 {
+		return StopPlan{}, errors.New("adjustment would make duration zero or negative")
+	}
+
+	return StopPlan{
+		ProjectPath: state.ProjectPath,
+		Status:      state.Status,
+		StartedAt:   state.StartedAt,
+		Duration:    duration,
+		Adjustment:  adjustment,
+	}, nil
+}
+
+func (s *Store) CommitStop(plan StopPlan, now time.Time) (StopResult, error) {
 	state, err := s.LoadState()
 	if err != nil {
 		return StopResult{}, err
@@ -105,17 +139,16 @@ func (s *Store) StopTimer(now time.Time) (StopResult, error) {
 	if state == nil {
 		return StopResult{}, errors.New("no active timer")
 	}
-	if state.Status != TimerStatusRunning && state.Status != TimerStatusPaused {
-		return StopResult{}, fmt.Errorf("unknown timer state %q", state.Status)
+	if state.ProjectPath != plan.ProjectPath || !state.StartedAt.Equal(plan.StartedAt) {
+		return StopResult{}, errors.New("timer changed before stop could be saved")
 	}
 
-	duration := elapsedForState(*state, now)
 	record := Record{
 		ID:            newRecordID(now),
-		ProjectPath:   state.ProjectPath,
-		StartedAt:     state.StartedAt,
+		ProjectPath:   plan.ProjectPath,
+		StartedAt:     plan.StartedAt,
 		EndedAt:       now.UTC(),
-		DurationNanos: int64(duration),
+		DurationNanos: int64(plan.Duration),
 	}
 
 	if err := s.AppendRecord(record); err != nil {
@@ -131,8 +164,16 @@ func (s *Store) StopTimer(now time.Time) (StopResult, error) {
 	}
 	return StopResult{
 		Record: record,
-		Totals: totalsForProject(records, state.ProjectPath),
+		Totals: totalsForProject(records, plan.ProjectPath),
 	}, nil
+}
+
+func (s *Store) StopTimer(now time.Time) (StopResult, error) {
+	plan, err := s.PlanStop(now, 0)
+	if err != nil {
+		return StopResult{}, err
+	}
+	return s.CommitStop(plan, now)
 }
 
 func elapsedForState(state TimerState, now time.Time) time.Duration {

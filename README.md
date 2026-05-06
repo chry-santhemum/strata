@@ -8,11 +8,19 @@
 strata project
 strata start [project]
 strata pause
-strata stop
+strata stop [negative-hour-adjustment]
 strata discard
 strata ls [project]
 strata mv <source-project> <target-project>
 ```
+
+`strata stop` asks for confirmation before saving a record. You can pass a negative decimal hour adjustment to subtract time from the saved duration:
+
+```text
+strata stop -2.5
+```
+
+The adjustment is applied after paused time is excluded. If the adjusted duration would be zero or negative, `strata` returns an error and leaves the timer alone.
 
 ## Development
 
