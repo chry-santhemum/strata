@@ -2,6 +2,7 @@ package strata
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,27 @@ func TestRunDiscardConfirmedClearsTimerWithoutRecord(t *testing.T) {
 	assertContains(t, stdout.String(), "Discarded current session on work.")
 }
 
+func TestRunPauseDisplaysPlan(t *testing.T) {
+	store := NewStore(t.TempDir())
+	mustCreateProject(t, store, "", "work")
+	startedAt := time.Now().UTC().Add(-30 * time.Minute)
+	if _, err := store.StartTimer("work", startedAt); err != nil {
+		t.Fatalf("start timer: %v", err)
+	}
+	if err := store.SaveCurrentPlan(testFocusPlan()); err != nil {
+		t.Fatalf("save focus plan: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runPause(store, nil, &stdout); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	output := stdout.String()
+	assertContains(t, output, "Paused timer on work")
+	assertContains(t, output, expectedPlanBlock())
+}
+
 func TestRunStopCancelledLeavesTimerStateAndRecords(t *testing.T) {
 	store := NewStore(t.TempDir())
 	mustCreateProject(t, store, "", "work")
@@ -157,6 +179,9 @@ func TestRunStopConfirmedSavesAdjustedDuration(t *testing.T) {
 	if _, err := store.StartTimer("work", startedAt); err != nil {
 		t.Fatalf("start timer: %v", err)
 	}
+	if err := store.SaveCurrentPlan(testFocusPlan()); err != nil {
+		t.Fatalf("save focus plan: %v", err)
+	}
 
 	var stdout bytes.Buffer
 	if err := runStop(store, []string{"-1.5"}, strings.NewReader("yes\n"), &stdout); err != nil {
@@ -178,10 +203,17 @@ func TestRunStopConfirmedSavesAdjustedDuration(t *testing.T) {
 		t.Fatalf("records length = %d, want 1: %+v", len(records), records)
 	}
 	assertDurationNear(t, time.Duration(records[0].DurationNanos), 90*time.Minute, 2*time.Second)
+	if records[0].Plan == nil {
+		t.Fatal("record plan is nil")
+	}
+	if records[0].Plan.ImmediateNextActions != testFocusPlan().ImmediateNextActions {
+		t.Fatalf("record plan immediate next actions = %q", records[0].Plan.ImmediateNextActions)
+	}
 
 	output := stdout.String()
 	assertContains(t, output, "Stop current running timer on work?")
 	assertContains(t, output, "Adjustment: -1h 30m")
+	assertContains(t, output, expectedPlanBlock())
 	assertContains(t, output, "Recorded: 1h 30m")
 }
 
@@ -234,6 +266,81 @@ func TestRunStopRejectsTooLargeAdjustmentBeforePrompt(t *testing.T) {
 	}
 }
 
+func TestRunLogShowsCompactRecordsNewestFirst(t *testing.T) {
+	store := NewStore(t.TempDir())
+	mustCreateProject(t, store, "", "work")
+	mustCreateProject(t, store, "work", "api")
+	mustCreateProject(t, store, "", "personal")
+
+	if err := store.SaveRecords([]Record{
+		{
+			ID:            "old",
+			ProjectPath:   "work",
+			StartedAt:     time.Date(2026, 5, 8, 9, 0, 0, 0, time.Local),
+			DurationNanos: int64(30 * time.Minute),
+		},
+		{
+			ID:            "new",
+			ProjectPath:   "work/api",
+			StartedAt:     time.Date(2026, 5, 8, 10, 0, 0, 0, time.Local),
+			DurationNanos: int64(45 * time.Minute),
+		},
+		{
+			ID:            "other",
+			ProjectPath:   "personal",
+			StartedAt:     time.Date(2026, 5, 8, 11, 0, 0, 0, time.Local),
+			DurationNanos: int64(15 * time.Minute),
+		},
+	}); err != nil {
+		t.Fatalf("save records: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runLog(store, []string{"work"}, &stdout); err != nil {
+		t.Fatalf("log: %v", err)
+	}
+
+	output := stdout.String()
+	assertContains(t, output, "new")
+	assertContains(t, output, "old")
+	assertNotContains(t, output, "other")
+	if strings.Index(output, "new") > strings.Index(output, "old") {
+		t.Fatalf("records are not newest first:\n%s", output)
+	}
+}
+
+func TestRunShowDisplaysRecordPlan(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if err := store.SaveRecords([]Record{
+		{
+			ID:            "2026-05-08-T0915-ab12cd34",
+			ProjectPath:   "work/api",
+			StartedAt:     time.Date(2026, 5, 8, 9, 15, 0, 0, time.Local),
+			DurationNanos: int64(45 * time.Minute),
+			Plan:          ptrFocusPlan(testFocusPlan()),
+		},
+	}); err != nil {
+		t.Fatalf("save records: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runShow(store, []string{"2026-05-08-T0915-ab12cd34"}, &stdout); err != nil {
+		t.Fatalf("show: %v", err)
+	}
+
+	output := stdout.String()
+	assertContains(t, output, "Project: work/api")
+	assertContains(t, output, "Duration: 45m")
+	assertContains(t, output, expectedPlanBlock())
+}
+
+func TestNewRecordIDOmitsSeconds(t *testing.T) {
+	id := newRecordID(time.Date(2026, 5, 8, 9, 15, 42, 0, time.Local))
+	if !regexp.MustCompile(`^2026-05-08-T0915-[0-9a-f]{8}$`).MatchString(id) {
+		t.Fatalf("record id = %q, want YYYY-MM-DD-THHMM-random", id)
+	}
+}
+
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {
@@ -253,4 +360,30 @@ func assertDurationNear(t *testing.T, got, want, tolerance time.Duration) {
 	if got < want-tolerance || got > want+tolerance {
 		t.Fatalf("duration = %s, want %s +/- %s", got, want, tolerance)
 	}
+}
+
+func testFocusPlan() FocusPlan {
+	return FocusPlan{
+		PlannedDuration:      "45m",
+		ImmediateNextActions: "Read the existing start flow.\nAdd a focus plan struct.",
+		ExpectedOutputs:      "A working prompt.\nTests for saving the plan.",
+	}
+}
+
+func ptrFocusPlan(plan FocusPlan) *FocusPlan {
+	return &plan
+}
+
+func expectedPlanBlock() string {
+	return `Plan
+1. How long do you plan to work on this?
+45m
+
+2. What are the immediate next actions?
+Read the existing start flow.
+Add a focus plan struct.
+
+3. What concrete outputs do you expect by the end?
+A working prompt.
+Tests for saving the plan.`
 }

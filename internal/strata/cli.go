@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,10 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		runErr = runDiscard(store, args[1:], stdin, stdout)
 	case "ls":
 		runErr = runList(store, args[1:], stdout)
+	case "log":
+		runErr = runLog(store, args[1:], stdout)
+	case "show":
+		runErr = runShow(store, args[1:], stdout)
 	case "mv":
 		runErr = runMove(store, args[1:], stdout)
 	default:
@@ -101,6 +106,13 @@ func runStart(store *Store, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err := RunFocusPlanPrompt(store); err != nil {
+		if errors.Is(err, ErrFocusPlanAborted) {
+			fmt.Fprintln(stdout, "Start aborted.")
+			return nil
+		}
+		return err
+	}
 	fmt.Fprintf(stdout, "Started timer on %s.\n", result.ProjectPath)
 	return nil
 }
@@ -114,6 +126,8 @@ func runPause(store *Store, args []string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "Paused timer on %s at %s.\n", result.ProjectPath, FormatDuration(result.Elapsed))
+	fmt.Fprintln(stdout)
+	writePlanBlock(stdout, result.Plan)
 	fmt.Fprintln(stdout, "Run strata start to resume, or strata stop to save it.")
 	return nil
 }
@@ -133,6 +147,9 @@ func runStop(store *Store, args []string, stdin io.Reader, stdout io.Writer) err
 	if hasAdjustment {
 		fmt.Fprintf(stdout, "Adjustment: %s\n", FormatSignedDuration(plan.Adjustment))
 	}
+	fmt.Fprintln(stdout)
+	writePlanBlock(stdout, plan.Plan)
+	fmt.Fprintln(stdout)
 	fmt.Fprint(stdout, "Save this record? [y/N]: ")
 
 	confirmed, err := readConfirmation(stdin)
@@ -267,6 +284,81 @@ func runList(store *Store, args []string, stdout io.Writer) error {
 	return nil
 }
 
+func runLog(store *Store, args []string, stdout io.Writer) error {
+	if len(args) > 1 {
+		return errors.New("usage: strata log [project]")
+	}
+
+	projectPath := ""
+	if len(args) == 1 {
+		var err error
+		projectPath, err = NormalizeOptionalProjectPath(args[0])
+		if err != nil {
+			return err
+		}
+	}
+
+	records, err := store.LoadRecords()
+	if err != nil {
+		return err
+	}
+	records = filterRecordsForProject(records, projectPath)
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].StartedAt.After(records[j].StartedAt)
+	})
+
+	if len(records) == 0 {
+		fmt.Fprintln(stdout, "No records.")
+		return nil
+	}
+	for _, record := range records {
+		fmt.Fprintf(stdout, "%s  %-8s  %-16s  %s\n", FormatLocalTime(record.StartedAt), FormatDuration(time.Duration(record.DurationNanos)), displayProjectPath(record.ProjectPath), record.ID)
+	}
+	return nil
+}
+
+func runShow(store *Store, args []string, stdout io.Writer) error {
+	if len(args) != 1 {
+		return errors.New("usage: strata show <record-id>")
+	}
+
+	records, err := store.LoadRecords()
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if record.ID != args[0] {
+			continue
+		}
+		fmt.Fprintf(stdout, "Project: %s\n", displayProjectPath(record.ProjectPath))
+		fmt.Fprintf(stdout, "Started: %s\n", FormatLocalTime(record.StartedAt))
+		fmt.Fprintf(stdout, "Duration: %s\n\n", FormatDuration(time.Duration(record.DurationNanos)))
+		writePlanBlock(stdout, record.Plan)
+		return nil
+	}
+	return fmt.Errorf("record not found: %s", args[0])
+}
+
+func filterRecordsForProject(records []Record, projectPath string) []Record {
+	if projectPath == "" {
+		return records
+	}
+	filtered := make([]Record, 0, len(records))
+	for _, record := range records {
+		if isProjectInSubtree(record.ProjectPath, projectPath) {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
+}
+
+func displayProjectPath(projectPath string) string {
+	if projectPath == "" {
+		return "/"
+	}
+	return projectPath
+}
+
 type listRow struct {
 	name     string
 	duration time.Duration
@@ -328,5 +420,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  strata stop [negative-hour-adjustment]")
 	fmt.Fprintln(w, "  strata discard")
 	fmt.Fprintln(w, "  strata ls [project]")
+	fmt.Fprintln(w, "  strata log [project]")
+	fmt.Fprintln(w, "  strata show <record-id>")
 	fmt.Fprintln(w, "  strata mv <source-project> <target-project>")
 }

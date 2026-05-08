@@ -16,6 +16,7 @@ type StartResult struct {
 type PauseResult struct {
 	ProjectPath string
 	Elapsed     time.Duration
+	Plan        *FocusPlan
 }
 
 type StopResult struct {
@@ -29,6 +30,7 @@ type StopPlan struct {
 	StartedAt   time.Time
 	Duration    time.Duration
 	Adjustment  time.Duration
+	Plan        *FocusPlan
 }
 
 func (s *Store) StartTimer(projectPath string, now time.Time) (StartResult, error) {
@@ -73,11 +75,24 @@ func (s *Store) StartTimer(projectPath string, now time.Time) (StartResult, erro
 		ProjectPath:   cleanPath,
 		StartedAt:     now.UTC(),
 		LastStartedAt: now.UTC(),
+		Plan:          &FocusPlan{},
 	}
 	if err := s.SaveState(state); err != nil {
 		return StartResult{}, err
 	}
 	return StartResult{ProjectPath: cleanPath}, nil
+}
+
+func (s *Store) SaveCurrentPlan(plan FocusPlan) error {
+	state, err := s.LoadState()
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		return errors.New("no active timer")
+	}
+	state.Plan = &plan
+	return s.SaveState(state)
 }
 
 func (s *Store) PauseTimer(now time.Time) (PauseResult, error) {
@@ -102,7 +117,7 @@ func (s *Store) PauseTimer(now time.Time) (PauseResult, error) {
 	if err := s.SaveState(state); err != nil {
 		return PauseResult{}, err
 	}
-	return PauseResult{ProjectPath: state.ProjectPath, Elapsed: elapsed}, nil
+	return PauseResult{ProjectPath: state.ProjectPath, Elapsed: elapsed, Plan: state.Plan}, nil
 }
 
 func (s *Store) PlanStop(now time.Time, adjustment time.Duration) (StopPlan, error) {
@@ -128,6 +143,7 @@ func (s *Store) PlanStop(now time.Time, adjustment time.Duration) (StopPlan, err
 		StartedAt:   state.StartedAt,
 		Duration:    duration,
 		Adjustment:  adjustment,
+		Plan:        state.Plan,
 	}, nil
 }
 
@@ -149,6 +165,7 @@ func (s *Store) CommitStop(plan StopPlan, now time.Time) (StopResult, error) {
 		StartedAt:     plan.StartedAt,
 		EndedAt:       now.UTC(),
 		DurationNanos: int64(plan.Duration),
+		Plan:          plan.Plan,
 	}
 
 	if err := s.AppendRecord(record); err != nil {
@@ -219,7 +236,7 @@ func stringsMatchProject(input, projectPath string) bool {
 func newRecordID(now time.Time) string {
 	random := make([]byte, 4)
 	if _, err := rand.Read(random); err != nil {
-		return now.UTC().Format("20060102T150405.000000000Z")
+		return now.Local().Format("2006-01-02-T1504") + "-00000000"
 	}
-	return now.UTC().Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(random)
+	return now.Local().Format("2006-01-02-T1504") + "-" + hex.EncodeToString(random)
 }

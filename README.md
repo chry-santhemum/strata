@@ -11,8 +11,12 @@ strata pause
 strata stop [negative-hour-adjustment]
 strata discard
 strata ls [project]
+strata log [project]
+strata show <record-id>
 strata mv <source-project> <target-project>
 ```
+
+Fresh starts ask a few planning questions after the timer begins. Resuming a paused timer skips those questions.
 
 `strata stop` asks for confirmation before saving a record. You can pass a negative decimal hour adjustment to subtract time from the saved duration:
 

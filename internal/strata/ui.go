@@ -9,6 +9,7 @@ import (
 )
 
 var ErrPickerCancelled = errors.New("selection cancelled")
+var ErrFocusPlanAborted = errors.New("focus plan aborted")
 
 type pickerPurpose int
 
@@ -74,6 +75,33 @@ func RunStartPicker(store *Store) (string, error) {
 		return "", ErrPickerCancelled
 	}
 	return model.selected, nil
+}
+
+func RunFocusPlanPrompt(store *Store) error {
+	state, err := store.LoadState()
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		return errors.New("no active timer")
+	}
+
+	model := newFocusPlanModel(store, state.Plan)
+	finalModel, err := tea.NewProgram(model).Run()
+	if err != nil {
+		return err
+	}
+	model, ok := finalModel.(focusPlanModel)
+	if !ok {
+		return nil
+	}
+	if model.aborted {
+		if err := store.ClearState(); err != nil {
+			return err
+		}
+		return ErrFocusPlanAborted
+	}
+	return nil
 }
 
 func newPickerModel(store *Store, purpose pickerPurpose) pickerModel {
@@ -269,4 +297,190 @@ func (m pickerModel) title() string {
 		return command + " /"
 	}
 	return command + " /" + m.current
+}
+
+type focusPlanModel struct {
+	store   *Store
+	index   int
+	values  []string
+	cursors []int
+	message string
+	aborted bool
+}
+
+func newFocusPlanModel(store *Store, plan *FocusPlan) focusPlanModel {
+	answers := focusPlanAnswers(plan)
+	return focusPlanModel{
+		store:   store,
+		values:  append([]string(nil), answers...),
+		cursors: []int{len([]rune(answers[0])), len([]rune(answers[1])), len([]rune(answers[2]))},
+	}
+}
+
+func (m focusPlanModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m focusPlanModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+
+	switch key.Type {
+	case tea.KeyCtrlC, tea.KeyEsc:
+		m.aborted = true
+		return m, tea.Quit
+	case tea.KeyTab:
+		m = m.save()
+		if m.index == len(focusPlanQuestions)-1 {
+			return m, tea.Quit
+		}
+		m.index++
+	case tea.KeyShiftTab:
+		m = m.save()
+		if m.index > 0 {
+			m.index--
+		}
+	case tea.KeyEnter:
+		m.insert("\n")
+		m = m.save()
+	case tea.KeyBackspace:
+		m.backspace()
+		m = m.save()
+	case tea.KeyDelete:
+		m.delete()
+		m = m.save()
+	case tea.KeyLeft:
+		if m.cursors[m.index] > 0 {
+			m.cursors[m.index]--
+		}
+	case tea.KeyRight:
+		if m.cursors[m.index] < len([]rune(m.values[m.index])) {
+			m.cursors[m.index]++
+		}
+	case tea.KeyUp:
+		m.cursors[m.index] = moveCursorVertically(m.values[m.index], m.cursors[m.index], -1)
+	case tea.KeyDown:
+		m.cursors[m.index] = moveCursorVertically(m.values[m.index], m.cursors[m.index], 1)
+	case tea.KeyRunes:
+		m.insert(string(key.Runes))
+		m = m.save()
+	case tea.KeySpace:
+		m.insert(" ")
+		m = m.save()
+	}
+	return m, nil
+}
+
+func (m focusPlanModel) View() string {
+	var builder strings.Builder
+	builder.WriteString("Some questions to help you plan:\n\n")
+	fmt.Fprintf(&builder, "%d/%d\n", m.index+1, len(focusPlanQuestions))
+	builder.WriteString(focusPlanQuestions[m.index])
+	builder.WriteString("\n\n")
+	builder.WriteString(renderEditableText(m.values[m.index], m.cursors[m.index]))
+	if m.message != "" {
+		fmt.Fprintf(&builder, "\n%s\n", m.message)
+	}
+	if m.index == len(focusPlanQuestions)-1 {
+		builder.WriteString("\nenter newline | tab finish | shift+tab previous | esc abort timer\n")
+	} else {
+		builder.WriteString("\nenter newline | tab next | shift+tab previous | esc abort timer\n")
+	}
+	return builder.String()
+}
+
+func (m focusPlanModel) save() focusPlanModel {
+	plan := focusPlanFromAnswers(m.values)
+	if err := m.store.SaveCurrentPlan(plan); err != nil {
+		m.message = "error: " + err.Error()
+	} else {
+		m.message = ""
+	}
+	return m
+}
+
+func (m *focusPlanModel) insert(text string) {
+	runes := []rune(m.values[m.index])
+	cursor := m.cursors[m.index]
+	inserted := []rune(text)
+	runes = append(runes[:cursor], append(inserted, runes[cursor:]...)...)
+	m.values[m.index] = string(runes)
+	m.cursors[m.index] += len(inserted)
+}
+
+func (m *focusPlanModel) backspace() {
+	cursor := m.cursors[m.index]
+	if cursor == 0 {
+		return
+	}
+	runes := []rune(m.values[m.index])
+	runes = append(runes[:cursor-1], runes[cursor:]...)
+	m.values[m.index] = string(runes)
+	m.cursors[m.index]--
+}
+
+func (m *focusPlanModel) delete() {
+	cursor := m.cursors[m.index]
+	runes := []rune(m.values[m.index])
+	if cursor >= len(runes) {
+		return
+	}
+	runes = append(runes[:cursor], runes[cursor+1:]...)
+	m.values[m.index] = string(runes)
+}
+
+func renderEditableText(value string, cursor int) string {
+	runes := []rune(value)
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(runes) {
+		cursor = len(runes)
+	}
+	withCursor := string(runes[:cursor]) + "|" + string(runes[cursor:])
+	lines := strings.Split(withCursor, "\n")
+	for i, line := range lines {
+		lines[i] = "> " + line
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func moveCursorVertically(value string, cursor, delta int) int {
+	lines, lineIndex, column := cursorLineColumn(value, cursor)
+	nextLine := lineIndex + delta
+	if nextLine < 0 || nextLine >= len(lines) {
+		return cursor
+	}
+	if column > len([]rune(lines[nextLine])) {
+		column = len([]rune(lines[nextLine]))
+	}
+
+	nextCursor := 0
+	for i := 0; i < nextLine; i++ {
+		nextCursor += len([]rune(lines[i])) + 1
+	}
+	return nextCursor + column
+}
+
+func cursorLineColumn(value string, cursor int) ([]string, int, int) {
+	runes := []rune(value)
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(runes) {
+		cursor = len(runes)
+	}
+
+	lines := strings.Split(value, "\n")
+	lineIndex := 0
+	lineStart := 0
+	for i := 0; i < cursor && i < len(runes); i++ {
+		if runes[i] == '\n' {
+			lineIndex++
+			lineStart = i + 1
+		}
+	}
+	return lines, lineIndex, cursor - lineStart
 }
