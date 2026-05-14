@@ -63,6 +63,44 @@ func TestRunListSummarizesNestedDirectory(t *testing.T) {
 	assertContains(t, output, "(unk.)   45m")
 }
 
+func TestRunListOrdersChildProjectsByRecentActivity(t *testing.T) {
+	store := NewStore(t.TempDir())
+	base := time.Date(2026, 5, 11, 9, 0, 0, 0, time.UTC)
+	if err := store.SaveProjects([]Project{
+		{Path: "alpha", CreatedAt: base},
+		{Path: "beta", CreatedAt: base},
+	}); err != nil {
+		t.Fatalf("save projects: %v", err)
+	}
+
+	if err := store.SaveRecords([]Record{
+		{
+			ID:            "old-alpha",
+			ProjectPath:   "alpha",
+			StartedAt:     base.Add(1 * time.Hour),
+			EndedAt:       base.Add(2 * time.Hour),
+			DurationNanos: int64(15 * time.Minute),
+		},
+		{
+			ID:            "new-beta",
+			ProjectPath:   "beta",
+			StartedAt:     base.Add(3 * time.Hour),
+			EndedAt:       base.Add(4 * time.Hour),
+			DurationNanos: int64(30 * time.Minute),
+		},
+	}); err != nil {
+		t.Fatalf("save records: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runList(store, nil, &stdout); err != nil {
+		t.Fatalf("run list: %v", err)
+	}
+
+	output := stdout.String()
+	assertBefore(t, output, "beta/", "alpha/")
+}
+
 func TestRunDiscardCancelledLeavesTimerState(t *testing.T) {
 	store := NewStore(t.TempDir())
 	mustCreateProject(t, store, "", "work")
@@ -352,6 +390,21 @@ func assertNotContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if strings.Contains(haystack, needle) {
 		t.Fatalf("output unexpectedly contains %q:\n%s", needle, haystack)
+	}
+}
+
+func assertBefore(t *testing.T, haystack, first, second string) {
+	t.Helper()
+	firstIndex := strings.Index(haystack, first)
+	if firstIndex < 0 {
+		t.Fatalf("output missing %q:\n%s", first, haystack)
+	}
+	secondIndex := strings.Index(haystack, second)
+	if secondIndex < 0 {
+		t.Fatalf("output missing %q:\n%s", second, haystack)
+	}
+	if firstIndex > secondIndex {
+		t.Fatalf("%q appears after %q:\n%s", first, second, haystack)
 	}
 }
 

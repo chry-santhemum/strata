@@ -68,6 +68,45 @@ func TestRenameProjectRejectsExistingTarget(t *testing.T) {
 	}
 }
 
+func TestListChildProjectsByRecentActivityUsesNewestSubtreeUpdate(t *testing.T) {
+	store := NewStore(t.TempDir())
+	base := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
+	if err := store.SaveProjects([]Project{
+		{Path: "alpha", CreatedAt: base.Add(1 * time.Hour)},
+		{Path: "archive", CreatedAt: base.Add(2 * time.Hour)},
+		{Path: "personal", CreatedAt: base.Add(3 * time.Hour)},
+		{Path: "work", CreatedAt: base.Add(4 * time.Hour)},
+		{Path: "work/api", CreatedAt: base.Add(5 * time.Hour)},
+	}); err != nil {
+		t.Fatalf("save projects: %v", err)
+	}
+
+	children, err := store.listChildProjectsByRecentActivity("", []Record{
+		{
+			ID:          "personal-record",
+			ProjectPath: "personal",
+			StartedAt:   base.Add(6 * time.Hour),
+			EndedAt:     base.Add(7 * time.Hour),
+		},
+		{
+			ID:          "work-record",
+			ProjectPath: "work/api",
+			StartedAt:   base.Add(8 * time.Hour),
+			EndedAt:     base.Add(9 * time.Hour),
+		},
+	}, &TimerState{
+		Status:        TimerStatusRunning,
+		ProjectPath:   "archive",
+		StartedAt:     base.Add(10 * time.Hour),
+		LastStartedAt: base.Add(10 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("list recent child projects: %v", err)
+	}
+
+	assertProjectOrder(t, children, "archive", "work", "personal", "alpha")
+}
+
 func mustCreateProject(t *testing.T, store *Store, parent, name string) {
 	t.Helper()
 	if _, err := store.CreateProject(parent, name); err != nil {
@@ -86,5 +125,17 @@ func assertProjectMissing(t *testing.T, projects []Project, path string) {
 	t.Helper()
 	if projectExists(projects, path) {
 		t.Fatalf("project %q unexpectedly present in %+v", path, projects)
+	}
+}
+
+func assertProjectOrder(t *testing.T, projects []Project, paths ...string) {
+	t.Helper()
+	if len(projects) != len(paths) {
+		t.Fatalf("project count = %d, want %d: %+v", len(projects), len(paths), projects)
+	}
+	for i, path := range paths {
+		if projects[i].Path != path {
+			t.Fatalf("project %d = %q, want %q in %+v", i, projects[i].Path, path, projects)
+		}
 	}
 }

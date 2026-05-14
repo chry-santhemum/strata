@@ -3,6 +3,7 @@ package strata
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -85,27 +86,46 @@ func (s *Store) ProjectExists(path string) (bool, error) {
 }
 
 func (s *Store) ListChildProjects(parentPath string) ([]Project, error) {
-	parent, err := NormalizeOptionalProjectPath(parentPath)
+	children, projects, err := s.loadChildProjects(parentPath)
 	if err != nil {
 		return nil, err
+	}
+	records, err := s.LoadRecords()
+	if err != nil {
+		return nil, err
+	}
+	state, err := s.LoadState()
+	if err != nil {
+		return nil, err
+	}
+	sortProjectsByRecentActivity(children, projects, records, state)
+	return children, nil
+}
+
+func (s *Store) listChildProjectsByRecentActivity(parentPath string, records []Record, state *TimerState) ([]Project, error) {
+	children, projects, err := s.loadChildProjects(parentPath)
+	if err != nil {
+		return nil, err
+	}
+	sortProjectsByRecentActivity(children, projects, records, state)
+	return children, nil
+}
+
+func (s *Store) loadChildProjects(parentPath string) ([]Project, []Project, error) {
+	parent, err := NormalizeOptionalProjectPath(parentPath)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	projects, err := s.LoadProjects()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if parent != "" && !projectExists(projects, parent) {
-		return nil, fmt.Errorf("%w: %s", ErrProjectNotFound, parent)
+		return nil, nil, fmt.Errorf("%w: %s", ErrProjectNotFound, parent)
 	}
 
-	children := make([]Project, 0)
-	for _, project := range projects {
-		if ParentProjectPath(project.Path) == parent {
-			children = append(children, project)
-		}
-	}
-	sortProjects(children)
-	return children, nil
+	return childProjects(projects, parent), projects, nil
 }
 
 func (s *Store) RenameProject(sourcePath, targetPath string) error {
@@ -229,6 +249,67 @@ func projectExists(projects []Project, path string) bool {
 		}
 	}
 	return false
+}
+
+func childProjects(projects []Project, parent string) []Project {
+	children := make([]Project, 0)
+	for _, project := range projects {
+		if ParentProjectPath(project.Path) == parent {
+			children = append(children, project)
+		}
+	}
+	return children
+}
+
+func sortProjectsByRecentActivity(projects, allProjects []Project, records []Record, state *TimerState) {
+	activity := projectActivityTimes(allProjects, records, state)
+	sort.SliceStable(projects, func(i, j int) bool {
+		left := activity[projects[i].Path]
+		right := activity[projects[j].Path]
+		if !left.Equal(right) {
+			return left.After(right)
+		}
+		return projects[i].Path < projects[j].Path
+	})
+}
+
+func projectActivityTimes(projects []Project, records []Record, state *TimerState) map[string]time.Time {
+	activity := make(map[string]time.Time)
+	for _, project := range projects {
+		markProjectActivity(activity, project.Path, project.CreatedAt)
+	}
+	for _, record := range records {
+		markProjectActivity(activity, record.ProjectPath, recordActivityTime(record))
+	}
+	if state != nil {
+		markProjectActivity(activity, state.ProjectPath, timerStateActivityTime(*state))
+	}
+	return activity
+}
+
+func recordActivityTime(record Record) time.Time {
+	if !record.EndedAt.IsZero() {
+		return record.EndedAt
+	}
+	return record.StartedAt
+}
+
+func timerStateActivityTime(state TimerState) time.Time {
+	if state.Status == TimerStatusRunning && !state.LastStartedAt.IsZero() {
+		return state.LastStartedAt
+	}
+	return state.StartedAt
+}
+
+func markProjectActivity(activity map[string]time.Time, projectPath string, at time.Time) {
+	if projectPath == "" || at.IsZero() {
+		return
+	}
+	for _, path := range AncestorProjectPaths(projectPath) {
+		if current := activity[path]; current.IsZero() || at.After(current) {
+			activity[path] = at
+		}
+	}
 }
 
 func normalizeProjectPath(input string, allowRoot bool) (string, error) {

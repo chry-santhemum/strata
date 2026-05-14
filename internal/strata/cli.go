@@ -256,11 +256,15 @@ func runList(store *Store, args []string, stdout io.Writer) error {
 		}
 	}
 
-	children, err := store.ListChildProjects(projectPath)
+	records, err := store.LoadRecords()
 	if err != nil {
 		return err
 	}
-	records, err := store.LoadRecords()
+	state, err := store.LoadState()
+	if err != nil {
+		return err
+	}
+	children, err := store.listChildProjectsByRecentActivity(projectPath, records, state)
 	if err != nil {
 		return err
 	}

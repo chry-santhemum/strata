@@ -40,7 +40,7 @@ func (s *Store) LoadProjects() ([]Project, error) {
 	if err := readJSONIfExists(s.projectsPath(), &file); err != nil {
 		return nil, err
 	}
-	sortProjects(file.Projects)
+	sortProjectsByPath(file.Projects)
 	return file.Projects, nil
 }
 
@@ -50,7 +50,7 @@ func (s *Store) SaveProjects(projects []Project) error {
 	}
 
 	copied := append([]Project(nil), projects...)
-	sortProjects(copied)
+	sortProjectsByPath(copied)
 	data, err := json.MarshalIndent(projectsFile{Projects: copied}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode projects: %w", err)
@@ -226,7 +226,7 @@ func writeFileAtomic(filename string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-func sortProjects(projects []Project) {
+func sortProjectsByPath(projects []Project) {
 	sort.Slice(projects, func(i, j int) bool {
 		return projects[i].Path < projects[j].Path
 	})
